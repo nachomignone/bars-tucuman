@@ -1,0 +1,36 @@
+# Dependencias
+node_modules/
+
+# Variables de entorno
+.env
+.env.local
+.env.production
+
+# Build
+dist/
+build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Documentación interna de sesión (no parte del proyecto)
+CLAUDE.md.md
+INSTRUCCIONES_CAMBIO_CHAT.md
+README_TEMPORAL.md
+REGISTRO_SESIONES.md
+RESUMEN_VISUAL.txt
+ÍNDICE.md
+ESTADO_PROYECTO.md
+00_ANÁLISIS_Y_ARQUITECTURA.md
+01_GUIA_EJECUCION.md
+RESUMEN_PROYECTO.md
