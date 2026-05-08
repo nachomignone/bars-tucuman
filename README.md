@@ -1,10 +1,10 @@
-# 🍺 Zoco — Sistema de Gestión de Bares y Eventos · Tucumán
+# Sistema de Gestión de Bares y Eventos · Tucumán
 
-> Sistema fullstack para obtener, procesar y administrar bares de Tucumán de forma automatizada, con clasificación y deduplicación inteligente usando IA.
+Sistema fullstack para obtener, procesar y administrar bares de Tucumán de forma automatizada, con clasificación y deduplicación inteligente usando IA.
 
 ---
 
-## ✅ Checklist de Requisitos
+## Checklist de Requisitos
 
 | Parte | Requisito | Estado |
 |-------|-----------|--------|
@@ -21,7 +21,7 @@
 
 ---
 
-## 🏗 Arquitectura
+## Arquitectura
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -55,7 +55,7 @@ Scraping mock → normalizarTexto() → MongoDB $regex → Groq Batch → Guarda
 
 ---
 
-## 🚀 Guía de Ejecución Rápida
+## Guía de Ejecución Rápida
 
 ### Requisitos previos
 - Node.js v18+
@@ -121,7 +121,7 @@ const CRON_INTERVAL = '0 */6 * * *'; // cada 6 horas
 
 ---
 
-## 🧠 Criterio Técnico (Parte 5)
+## Criterio Técnico (Parte 5)
 
 ### ¿Cómo evitamos duplicados?
 
@@ -143,7 +143,7 @@ Edge cases cubiertos:
 
 **Capa 2 — Batch Prompting con Groq:**
 
-En lugar de iterar candidato por candidato (N llamadas), se envía una única llamada con todos los candidatos y el bar nuevo. El modelo evalúa el conjunto completo y devuelve el ID del mejor match junto con confianza y motivo.
+En lugar de iterar candidato por candidato (N llamadas a la API), se envía una única llamada con todos los candidatos y el bar nuevo. El modelo evalúa el conjunto completo y devuelve el ID del mejor match junto con confianza y motivo.
 
 El prompt distingue explícitamente dos escenarios:
 - **Error de tipeo:** mismo nombre + misma calle con número casi igual (1060 vs 1064) → Duplicado, confianza 85-95%
@@ -185,7 +185,7 @@ Si la confianza supera 70%, el sistema marca el registro con `posibleDuplicadoDe
 
 **Sin re-análisis retroactivo:** los registros ya existentes en la DB no se re-evalúan cuando mejora el prompt de deduplicación. Un bar duplicado que entró antes del refactor permanece sin el badge de advertencia.
 
-**Clasificación por nombre únicamente limitada:** bares con nombres abstractos ("El Galpón", "La Esquina") sin horario ni ubicación informativa caen en "Otro" por diseño (fallback obligatorio). Requieren corrección manual.
+**Clasificación limitada sin contexto:** bares con nombres abstractos ("El Galpón", "La Esquina") sin horario ni ubicación informativa caen en "Otro" por diseño (fallback obligatorio). Requieren corrección manual.
 
 ---
 
@@ -204,12 +204,12 @@ Si la confianza supera 70%, el sistema marca el registro con `posibleDuplicadoDe
 **Feedback loop:**
 - Registrar las decisiones del operador (cuando confirma o descarta un duplicado sugerido) y usarlas para ajustar el umbral de confianza dinámicamente por categoría
 
-**Agente IA conversacional (bonus no implementado):**
+**Agente IA conversacional (no implementado):**
 - Un agente que responda preguntas en lenguaje natural sobre los datos ("¿cuántos bares nuevos se agregaron esta semana?", "¿qué bares tienen horario de madrugada?") usando los datos de MongoDB como contexto
 
 ---
 
-## 🛠 Stack Técnico
+## Stack Técnico
 
 | Capa | Tecnología |
 |------|-----------|
@@ -226,7 +226,7 @@ Si la confianza supera 70%, el sistema marca el registro con `posibleDuplicadoDe
 
 ---
 
-## 📁 Estructura del Proyecto
+## Estructura del Proyecto
 
 ```
 bars-tucuman/
