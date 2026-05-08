@@ -85,15 +85,15 @@ export const crearBar = async (req, res) => {
     let clasificadoPorIA = false;
 
     if (!categoria) {
-      console.log(`🤖 Clasificando "${nombre}" con Gemini...`);
+      console.log(`🤖 Clasificando "${nombre}" con Groq...`);
       categoriaFinal = await clasificarBar(nombre, ubicacion);
       clasificadoPorIA = true;
     }
 
-    // Verificar duplicados
+    // Verificar duplicados — buscar por primera palabra del nombre
+    const palabraClave = nombre.split(' ')[0];
     const posiblesDuplicados = await Bar.find({
-      nombre: { $regex: nombre, $options: 'i' },
-      ubicacion: { $regex: ubicacion, $options: 'i' },
+      nombre: { $regex: palabraClave, $options: 'i' },
       activo: true,
     });
 
@@ -101,16 +101,18 @@ export const crearBar = async (req, res) => {
     let confianzaDeduplicacion = 0;
 
     if (posiblesDuplicados.length > 0) {
-      console.log(`⚠️ Se encontraron ${posiblesDuplicados.length} posibles duplicados`);
-      const resultado = await detectarDuplicado(
-        { nombre, ubicacion },
-        { nombre: posiblesDuplicados[0].nombre, ubicacion: posiblesDuplicados[0].ubicacion }
-      );
-
-      if (resultado.esDuplicado && resultado.confianza > 70) {
-        posibleDuplicadoDe = posiblesDuplicados[0]._id;
-        confianzaDeduplicacion = resultado.confianza;
-        console.log(`⚠️ Marca como posible duplicado con ${confianzaDeduplicacion}% confianza`);
+      console.log(`🔍 Comparando contra ${posiblesDuplicados.length} bar(es) existente(s)...`);
+      for (const existente of posiblesDuplicados) {
+        const resultado = await detectarDuplicado(
+          { nombre, ubicacion },
+          { nombre: existente.nombre, ubicacion: existente.ubicacion }
+        );
+        if (resultado.esDuplicado && resultado.confianza > 70) {
+          posibleDuplicadoDe = existente._id;
+          confianzaDeduplicacion = resultado.confianza;
+          console.log(`⚠️ Duplicado detectado con "${existente.nombre}" (${confianzaDeduplicacion}%)`);
+          break;
+        }
       }
     }
 
