@@ -224,6 +224,8 @@ Si la confianza supera 70%, el sistema marca el registro con `posibleDuplicadoDe
 
 > **Nota sobre la elección de Groq:** el proyecto inició con Google Gemini, pero durante el desarrollo se agotó el cupo del tier gratuito. Se migró a Groq (llama-3.3-70b-versatile) que ofrece un tier gratuito más generoso y latencias más bajas. La migración no requirió cambiar ningún prompt — solo el cliente de SDK.
 
+> **Estrategia de UI:** para este MVP se optó por Tailwind CSS puro con clases utilitarias y una semántica de colores propia (ámbar para bares, púrpura para boliches, verde para cafés, rojo para recitales). Esta decisión mantuvo el bundle liviano, permitió iterar con agilidad y evitó el overhead de configuración de librerías de componentes externas. La coherencia visual se logra sin abstracciones innecesarias. Para escalar a futuro, la adopción de un sistema como shadcn/ui sería el paso natural para estandarizar la interfaz a mayor escala.
+
 ---
 
 ## Estructura del Proyecto
