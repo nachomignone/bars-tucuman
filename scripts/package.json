@@ -1,5 +1,5 @@
 {
-  "name": "zoco-automation",
+  "name": "bars-automation",
   "version": "1.0.0",
   "description": "Script de automatización para scraping y clasificación de bares en Tucumán",
   "main": "automation.js",

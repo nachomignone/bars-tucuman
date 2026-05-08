@@ -31,8 +31,8 @@ export default function Dashboard() {
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold text-gray-900">🍺 Zoco</h1>
-            <p className="text-xs text-gray-500">Gestión de Bares · Tucumán</p>
+            <h1 className="text-xl font-bold text-gray-900">Gestión de Bares</h1>
+            <p className="text-xs text-gray-500">Tucumán, Argentina</p>
           </div>
           <button
             onClick={abrirCrear}
