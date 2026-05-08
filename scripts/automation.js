@@ -102,7 +102,7 @@ Ejemplos de duplicados:
 - "Bar Irlanda" y "Irlanda Bar" (mismo lugar, nombre diferente)
 - "Boliche Aché" y "Boliche Ache" (mismo lugar, sin tilde)
 
-Responde ÚNICAMENTE con JSON válido, sin texto adicional:
+IMPORTANTE: Responde ÚNICAMENTE con el JSON, nada más antes ni después:
 {"esDuplicado": true, "confianza": 85, "motivo": "mismo nombre reordenado"}`,
         },
       ],
@@ -111,10 +111,20 @@ Responde ÚNICAMENTE con JSON válido, sin texto adicional:
     });
 
     const responseText = completion.choices[0]?.message?.content?.trim() || '';
-    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return { esDuplicado: false, confianza: 0, motivo: 'No se pudo procesar' };
 
-    return JSON.parse(jsonMatch[0]);
+    // Extraer JSON aunque el modelo agregue texto antes/después
+    const jsonMatch = responseText.match(/\{[^{}]*"esDuplicado"[^{}]*\}/);
+    if (!jsonMatch) {
+      console.error('  ⚠️  Respuesta IA no parseable:', responseText.slice(0, 100));
+      return { esDuplicado: false, confianza: 0, motivo: 'No se pudo procesar' };
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    // Normalizar: confianza puede venir como string "85%" o número 85
+    if (typeof parsed.confianza === 'string') {
+      parsed.confianza = parseInt(parsed.confianza, 10) || 0;
+    }
+    return parsed;
   } catch (error) {
     console.error('  ❌ Error detectando duplicado:', error.message);
     return { esDuplicado: false, confianza: 0, motivo: 'Error en procesamiento' };
