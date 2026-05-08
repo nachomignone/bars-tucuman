@@ -1,5 +1,18 @@
 import Bar from '../models/Bar.js';
-import { clasificarBar, detectarDuplicado } from '../utils/aiService.js';
+import { clasificarBar, detectarMejorDuplicado } from '../utils/aiService.js';
+
+// ─── Normalización para pre-filtro MongoDB ────────────────────────────────────
+const STOP_WORDS = new Set(['bar', 'boliche', 'pub', 'cafe', 'cafeteria', 'el', 'la', 'los', 'las', 'de', 'del', 'y', 'e']);
+
+const normalizarTexto = (texto) => {
+  return texto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // quitar tildes
+    .replace(/[^a-z0-9\s]/g, '')     // quitar caracteres especiales
+    .split(/\s+/)
+    .filter((palabra) => palabra.length > 1 && !STOP_WORDS.has(palabra));
+};
 
 /**
  * OBTENER TODOS LOS BARES
@@ -86,33 +99,48 @@ export const crearBar = async (req, res) => {
 
     if (!categoria) {
       console.log(`🤖 Clasificando "${nombre}" con Groq...`);
-      categoriaFinal = await clasificarBar(nombre, ubicacion);
+      categoriaFinal = await clasificarBar(nombre, ubicacion, horario, telefono);
       clasificadoPorIA = true;
     }
 
-    // Verificar duplicados — buscar por primera palabra del nombre
-    const palabraClave = nombre.split(' ')[0];
-    const posiblesDuplicados = await Bar.find({
-      nombre: { $regex: palabraClave, $options: 'i' },
-      activo: true,
-    });
+    // ── Capa 1: Pre-filtro MongoDB con normalización ──────────────────────────
+    const palabrasSignificativas = normalizarTexto(nombre);
+    let posiblesDuplicados = [];
 
+    if (palabrasSignificativas.length === 0) {
+      // Edge case: nombre compuesto solo de stop words (ej: "El Bar", "La Disco")
+      // Fallback: búsqueda exacta por nombre completo para no matchear todo
+      console.log(`⚠️  Nombre "${nombre}" solo contiene stop words — usando búsqueda exacta`);
+      posiblesDuplicados = await Bar.find({
+        nombre: { $regex: `^${nombre.trim()}$`, $options: 'i' },
+        activo: true,
+      }).select('_id nombre ubicacion telefono').limit(10);
+    } else {
+      // Limitar a 10 candidatos para no superar el límite de tokens de Groq
+      const regexPattern = palabrasSignificativas.join('|');
+      posiblesDuplicados = await Bar.find({
+        nombre: { $regex: regexPattern, $options: 'i' },
+        activo: true,
+      }).select('_id nombre ubicacion telefono').limit(10);
+    }
+
+    // ── Capa 2: Batch prompting — una sola llamada a Groq ─────────────────────
     let posibleDuplicadoDe = null;
     let confianzaDeduplicacion = 0;
 
+    // Edge case: sin candidatos → saltar Groq directamente
     if (posiblesDuplicados.length > 0) {
-      console.log(`🔍 Comparando contra ${posiblesDuplicados.length} bar(es) existente(s)...`);
-      for (const existente of posiblesDuplicados) {
-        const resultado = await detectarDuplicado(
-          { nombre, ubicacion },
-          { nombre: existente.nombre, ubicacion: existente.ubicacion }
-        );
-        if (resultado.esDuplicado && resultado.confianza > 70) {
-          posibleDuplicadoDe = existente._id;
-          confianzaDeduplicacion = resultado.confianza;
-          console.log(`⚠️ Duplicado detectado con "${existente.nombre}" (${confianzaDeduplicacion}%)`);
-          break;
-        }
+      console.log(`🔍 Pre-filtro encontró ${posiblesDuplicados.length} candidato(s). Enviando batch a Groq...`);
+
+      const resultado = await detectarMejorDuplicado(
+        { nombre, ubicacion, telefono: telefono || '' },
+        posiblesDuplicados
+      );
+
+      if (resultado.duplicadoId && resultado.duplicadoId !== 'null' && resultado.confianza > 70) {
+        posibleDuplicadoDe = resultado.duplicadoId;
+        confianzaDeduplicacion = resultado.confianza;
+        console.log(`⚠️ Duplicado detectado (id: ${posibleDuplicadoDe}, confianza: ${confianzaDeduplicacion}%)`);
       }
     }
 

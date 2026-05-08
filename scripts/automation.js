@@ -4,7 +4,7 @@
  *
  * Ejecuta un ciclo de scraping simulado cada 6 horas (configurable).
  * Clasifica bares con IA (Groq / llama-3.3-70b-versatile).
- * Detecta y marca duplicados automáticamente.
+ * Detecta duplicados con batch prompting — una sola llamada por ciclo.
  * Persiste resultados en MongoDB Atlas.
  */
 
@@ -19,14 +19,13 @@ import Groq from 'groq-sdk';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Cargar variables desde backend/.env (scripts no tiene su propio .env)
 dotenv.config({ path: join(__dirname, '../backend/.env') });
 
 // ─── Groq Client ──────────────────────────────────────────────────────────────
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const MODEL = 'llama-3.3-70b-versatile';
 
-// ─── Schema de Bar (autónomo, sin depender de backend/) ───────────────────────
+// ─── Schema de Bar (autónomo) ─────────────────────────────────────────────────
 const barSchema = new mongoose.Schema(
   {
     nombre: { type: String, required: true, trim: true },
@@ -48,24 +47,81 @@ const barSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Evitar re-registrar el modelo si ya existe (por hot-reload)
 const Bar = mongoose.models.Bar || mongoose.model('Bar', barSchema);
+
+// ─── Schema de CronLog ────────────────────────────────────────────────────────
+const cronLogSchema = new mongoose.Schema(
+  {
+    fechaInicio: { type: Date, required: true },
+    fechaFin: { type: Date, required: true },
+    duracionMs: { type: Number, required: true },
+    procesados: { type: Number, default: 0 },
+    guardados: { type: Number, default: 0 },
+    duplicados: { type: Number, default: 0 },
+    errores: { type: Number, default: 0 },
+    detalle: [
+      {
+        nombre: String,
+        accion: { type: String, enum: ['guardado', 'duplicado', 'error'] },
+        categoria: String,
+        confianzaDuplicado: Number,
+        motivo: String,
+      },
+    ],
+  },
+  { timestamps: false }
+);
+
+const CronLog = mongoose.models.CronLog || mongoose.model('CronLog', cronLogSchema);
+
+// ─── Normalización para pre-filtro MongoDB ────────────────────────────────────
+const STOP_WORDS = new Set(['bar', 'boliche', 'pub', 'cafe', 'cafeteria', 'el', 'la', 'los', 'las', 'de', 'del', 'y', 'e']);
+
+function normalizarTexto(texto) {
+  return texto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9\s]/g, '')
+    .split(/\s+/)
+    .filter((p) => p.length > 1 && !STOP_WORDS.has(p));
+}
 
 // ─── Funciones de IA ──────────────────────────────────────────────────────────
 
-async function clasificarBar(nombre, ubicacion) {
+async function clasificarBar(nombre, ubicacion, horario = '', telefono = '') {
   try {
     const completion = await groq.chat.completions.create({
       model: MODEL,
       messages: [
         {
           role: 'user',
-          content: `Clasifica el siguiente lugar en UNA de estas categorías: Bar, Boliche, Café, Recital, Otro.
+          content: `Eres un clasificador experto de establecimientos de ocio y gastronomía en Tucumán, Argentina.
 
-Nombre: "${nombre}"
-Ubicación: "${ubicacion}"
+Analizá TODOS los datos disponibles y clasificá el establecimiento en UNA de estas categorías:
 
-Responde SOLO con la categoría, sin explicación.`,
+CATEGORÍAS Y CRITERIOS:
+- Bar: pub, cervecería, bar de copas, whisquería, bar irlandés/celta. Horario típico: tarde-noche (18:00-03:00)
+- Boliche: discoteca, club nocturno, dance club, after hour. Horario típico: madrugada (00:00-06:00)
+- Café: cafetería, confitería, coffee shop, panadería con mesas. Horario típico: mañana-tarde (07:00-22:00)
+- Recital: teatro, sala de shows, espacio cultural, venue de música en vivo, peña folklórica
+- Otro: restaurante, casino, salón de eventos, hotel, spa, o cualquier otro que no encaje claramente
+
+DATOS DEL ESTABLECIMIENTO:
+- Nombre: "${nombre}"
+- Ubicación: "${ubicacion}"
+- Horario: "${horario || 'no disponible'}"
+- Teléfono: "${telefono || 'no disponible'}"
+
+INSTRUCCIONES DE ANÁLISIS (en orden de prioridad):
+1. Palabras clave en el nombre: "bar", "pub", "irish", "cervecería" → Bar | "boliche", "disco", "club" → Boliche | "café", "coffee", "confitería" → Café | "teatro", "cultural", "peña" → Recital
+2. Inferencia por horario: madrugada (00:00-06:00) → probable Boliche | matutino (07:00-14:00) → probable Café | nocturno extendido (20:00-03:00) → probable Bar
+3. Inferencia por ubicación: shopping o centro comercial → probable Café | zona céntrica nocturna de Tucumán → probable Bar o Boliche
+4. Referencias culturales: "Irlanda", "Irish", "Celtic" → Bar | "Jazz", "Blues", "Folk" → Bar o Recital
+
+FALLBACK OBLIGATORIO: Si el nombre es abstracto (ej: "La Esquina", "El Galpón") Y no tenés horario ni ubicación suficiente para inferir con seguridad → respondé OBLIGATORIAMENTE "Otro".
+
+Responde SOLO con la categoría exacta: Bar, Boliche, Café, Recital u Otro. Sin explicación.`,
         },
       ],
       temperature: 0.1,
@@ -81,53 +137,74 @@ Responde SOLO con la categoría, sin explicación.`,
   }
 }
 
-async function detectarDuplicado(bar1, bar2) {
+async function detectarMejorDuplicado(barNuevo, candidatos) {
+  if (!candidatos.length) return { duplicadoId: null, confianza: 0, motivo: 'Sin candidatos' };
+
   try {
+    const listaCandidatos = candidatos
+      .map(
+        (c, i) =>
+          `Candidato ${i + 1} (id: "${c._id}"):
+  - Nombre: "${c.nombre}"
+  - Ubicación: "${c.ubicacion}"
+  - Teléfono: "${c.telefono || 'no disponible'}"`
+      )
+      .join('\n\n');
+
     const completion = await groq.chat.completions.create({
       model: MODEL,
       messages: [
         {
           role: 'user',
-          content: `Analiza si estos dos bares son el MISMO establecimiento (duplicados):
+          content: `Eres un sistema experto en deduplicación de bares y locales nocturnos en Tucumán, Argentina.
 
-Bar 1:
-- Nombre: "${bar1.nombre}"
-- Ubicación: "${bar1.ubicacion}"
+Tenés un BAR NUEVO que se quiere registrar y una lista de CANDIDATOS ya existentes en la base de datos.
+Tu tarea: identificar cuál candidato (si alguno) es el MISMO establecimiento que el bar nuevo.
 
-Bar 2:
-- Nombre: "${bar2.nombre}"
-- Ubicación: "${bar2.ubicacion}"
+BAR NUEVO:
+- Nombre: "${barNuevo.nombre}"
+- Ubicación: "${barNuevo.ubicacion}"
+- Teléfono: "${barNuevo.telefono || 'no disponible'}"
 
-Ejemplos de duplicados:
-- "Bar Irlanda" y "Irlanda Bar" (mismo lugar, nombre diferente)
-- "Boliche Aché" y "Boliche Ache" (mismo lugar, sin tilde)
+CANDIDATOS:
+${listaCandidatos}
+
+REGLAS DE EVALUACIÓN:
+A) Nombre muy similar + misma calle con número casi igual (ej: 1060 vs 1064) → Error de tipeo → DUPLICADO (confianza 85-95%)
+B) Nombre muy similar + calles totalmente distintas → Posible franquicia/sucursal → NO duplicado (confianza 20-40%)
+C) Si los teléfonos coinciden o son casi iguales → aumenta la probabilidad de ser el mismo establecimiento
+D) Nombre reordenado (ej: "Bar Irlanda" vs "Irlanda Bar") + misma zona → DUPLICADO
+E) Nombres parecidos pero distintos → usar ubicación y teléfono para decidir
+F) Diferencias de tildes, mayúsculas o artículos no indican establecimientos distintos
+
+Evaluá TODOS los candidatos y devolvé el que tenga MAYOR probabilidad de ser duplicado.
+Si ninguno supera confianza 50%, devolvé null como duplicadoId.
 
 IMPORTANTE: Responde ÚNICAMENTE con el JSON, nada más antes ni después:
-{"esDuplicado": true, "confianza": 85, "motivo": "mismo nombre reordenado"}`,
+{"duplicadoId": "<id del candidato o null>", "confianza": 90, "motivo": "mismo nombre e dirección casi idéntica"}`,
         },
       ],
       temperature: 0.1,
-      max_tokens: 80,
+      max_tokens: 120,
     });
 
     const responseText = completion.choices[0]?.message?.content?.trim() || '';
+    const jsonMatch = responseText.match(/\{[^{}]*"duplicadoId"[^{}]*\}/);
 
-    // Extraer JSON aunque el modelo agregue texto antes/después
-    const jsonMatch = responseText.match(/\{[^{}]*"esDuplicado"[^{}]*\}/);
     if (!jsonMatch) {
-      console.error('  ⚠️  Respuesta IA no parseable:', responseText.slice(0, 100));
-      return { esDuplicado: false, confianza: 0, motivo: 'No se pudo procesar' };
+      console.error('  ⚠️  Respuesta IA no parseable:', responseText.slice(0, 120));
+      return { duplicadoId: null, confianza: 0, motivo: 'No se pudo procesar' };
     }
 
-    const parsed = JSON.parse(jsonMatch[0]);
-    // Normalizar: confianza puede venir como string "85%" o número 85
-    if (typeof parsed.confianza === 'string') {
-      parsed.confianza = parseInt(parsed.confianza, 10) || 0;
+    const respuesta = JSON.parse(jsonMatch[0]);
+    if (typeof respuesta.confianza === 'string') {
+      respuesta.confianza = parseInt(respuesta.confianza, 10) || 0;
     }
-    return parsed;
+
+    return respuesta;
   } catch (error) {
     console.error('  ❌ Error detectando duplicado:', error.message);
-    return { esDuplicado: false, confianza: 0, motivo: 'Error en procesamiento' };
+    return { duplicadoId: null, confianza: 0, motivo: 'Error en procesamiento' };
   }
 }
 
@@ -160,8 +237,9 @@ function obtenerBaresScraped() {
 
 async function ejecutarCiclo() {
   const separator = '═'.repeat(55);
+  const fechaInicio = new Date();
   console.log(`\n${separator}`);
-  console.log(`  🤖 CICLO DE SCRAPING — ${new Date().toLocaleString('es-AR')}`);
+  console.log(`  🤖 CICLO DE SCRAPING — ${fechaInicio.toLocaleString('es-AR')}`);
   console.log(`${separator}`);
 
   const scraped = obtenerBaresScraped();
@@ -169,72 +247,144 @@ async function ejecutarCiclo() {
 
   let guardados = 0;
   let duplicadosOmitidos = 0;
+  let errores = 0;
+  const detalle = [];
 
   for (const barData of scraped) {
     console.log(`\n  ▶ Procesando: "${barData.nombre}"`);
 
-    // 1. Clasificar con IA
-    const categoria = await clasificarBar(barData.nombre, barData.ubicacion);
-    console.log(`     🏷  Categoría IA: ${categoria}`);
+    try {
+      // 1. Clasificar con IA
+      const categoria = await clasificarBar(
+        barData.nombre,
+        barData.ubicacion,
+        barData.horario,
+        barData.telefono
+      );
+      console.log(`     🏷  Categoría IA: ${categoria}`);
 
-    // 2. Buscar posibles duplicados en DB
-    const posiblesDuplicados = await Bar.find({
-      nombre: { $regex: barData.nombre.split(' ')[0], $options: 'i' },
-      activo: true,
-    });
+      // 2. Pre-filtro MongoDB con normalización de texto
+      const palabrasSignificativas = normalizarTexto(barData.nombre);
+      let candidatos = [];
 
-    let esDuplicado = false;
-    let refDuplicado = null;
-    let confianza = 0;
+      if (palabrasSignificativas.length === 0) {
+        // Edge case: nombre compuesto solo de stop words → búsqueda exacta
+        console.log(`     ⚠️  Nombre solo tiene stop words — usando búsqueda exacta`);
+        candidatos = await Bar.find({
+          nombre: { $regex: `^${barData.nombre.trim()}$`, $options: 'i' },
+          activo: true,
+        }).select('_id nombre ubicacion telefono').limit(10);
+      } else {
+        // Límite de 10 candidatos para no superar TPM de Groq
+        const regexPattern = palabrasSignificativas.join('|');
+        candidatos = await Bar.find({
+          nombre: { $regex: regexPattern, $options: 'i' },
+          activo: true,
+        }).select('_id nombre ubicacion telefono').limit(10);
+      }
 
-    if (posiblesDuplicados.length > 0) {
-      console.log(`     🔍 Comparando contra ${posiblesDuplicados.length} bar(es) existente(s)...`);
+      // 3. Batch prompting — una sola llamada a Groq para todos los candidatos
+      let refDuplicado = null;
+      let confianza = 0;
+      let motivoDuplicado = '';
 
-      for (const existente of posiblesDuplicados) {
-        const resultado = await detectarDuplicado(barData, existente);
-        console.log(
-          `     → vs "${existente.nombre}": ${resultado.esDuplicado ? '⚠️ DUPLICADO' : '✅ Diferente'} (confianza: ${resultado.confianza}%)`
+      if (candidatos.length > 0) {
+        console.log(`     🔍 Pre-filtro: ${candidatos.length} candidato(s). Enviando batch a Groq...`);
+
+        const resultado = await detectarMejorDuplicado(
+          { nombre: barData.nombre, ubicacion: barData.ubicacion, telefono: barData.telefono || '' },
+          candidatos
         );
 
-        if (resultado.esDuplicado && resultado.confianza > 70) {
-          esDuplicado = true;
-          refDuplicado = existente._id;
+        console.log(
+          `     → ${resultado.duplicadoId && resultado.duplicadoId !== 'null'
+            ? `⚠️ DUPLICADO (confianza: ${resultado.confianza}%) — ${resultado.motivo}`
+            : `✅ Único (confianza duplicado: ${resultado.confianza}%)`}`
+        );
+
+        if (resultado.duplicadoId && resultado.duplicadoId !== 'null' && resultado.confianza > 70) {
+          refDuplicado = resultado.duplicadoId;
           confianza = resultado.confianza;
-          break;
+          motivoDuplicado = resultado.motivo;
         }
       }
+
+      if (refDuplicado) {
+        console.log(`     ⏭  Omitido — duplicado con confianza ${confianza}%`);
+        duplicadosOmitidos++;
+        detalle.push({
+          nombre: barData.nombre,
+          accion: 'duplicado',
+          categoria,
+          confianzaDuplicado: confianza,
+          motivo: motivoDuplicado,
+        });
+        continue;
+      }
+
+      // 4. Guardar en MongoDB
+      const nuevoBar = new Bar({
+        nombre: barData.nombre.trim(),
+        ubicacion: barData.ubicacion.trim(),
+        categoria,
+        telefono: barData.telefono || '',
+        horario: barData.horario || '',
+        fuente: 'scraping_automatico',
+        clasificadoPorIA: true,
+        posibleDuplicadoDe: null,
+        confianzaDeduplicacion: 0,
+      });
+
+      await nuevoBar.save();
+      console.log(`     ✅ Guardado en MongoDB (id: ${nuevoBar._id})`);
+      guardados++;
+      detalle.push({
+        nombre: barData.nombre,
+        accion: 'guardado',
+        categoria,
+        confianzaDuplicado: 0,
+        motivo: '',
+      });
+
+    } catch (err) {
+      console.error(`     ❌ Error procesando "${barData.nombre}":`, err.message);
+      errores++;
+      detalle.push({
+        nombre: barData.nombre,
+        accion: 'error',
+        motivo: err.message,
+      });
     }
-
-    if (esDuplicado) {
-      console.log(`     ⏭  Omitido — duplicado con confianza ${confianza}%`);
-      duplicadosOmitidos++;
-      continue;
-    }
-
-    // 3. Guardar en MongoDB
-    const nuevoBar = new Bar({
-      nombre: barData.nombre.trim(),
-      ubicacion: barData.ubicacion.trim(),
-      categoria,
-      telefono: barData.telefono || '',
-      horario: barData.horario || '',
-      fuente: 'scraping_automatico',
-      clasificadoPorIA: true,
-      posibleDuplicadoDe: refDuplicado,
-      confianzaDeduplicacion: confianza,
-    });
-
-    await nuevoBar.save();
-    console.log(`     ✅ Guardado en MongoDB (id: ${nuevoBar._id})`);
-    guardados++;
   }
+
+  const fechaFin = new Date();
+  const duracionMs = fechaFin - fechaInicio;
 
   console.log(`\n${separator}`);
   console.log(`  📊 RESUMEN DEL CICLO`);
   console.log(`     • Procesados  : ${scraped.length}`);
   console.log(`     • Guardados   : ${guardados}`);
   console.log(`     • Duplicados  : ${duplicadosOmitidos}`);
+  console.log(`     • Errores     : ${errores}`);
+  console.log(`     • Duración    : ${duracionMs}ms`);
   console.log(`${separator}\n`);
+
+  // ── Persistir log en MongoDB ──────────────────────────────────────────────
+  try {
+    await CronLog.create({
+      fechaInicio,
+      fechaFin,
+      duracionMs,
+      procesados: scraped.length,
+      guardados,
+      duplicados: duplicadosOmitidos,
+      errores,
+      detalle,
+    });
+    console.log(`  💾 Log persistido en MongoDB (colección: cronlogs)\n`);
+  } catch (logErr) {
+    console.error('  ❌ Error guardando log:', logErr.message);
+  }
 }
 
 // ─── Conexión a MongoDB y arranque ───────────────────────────────────────────
@@ -245,7 +395,6 @@ async function iniciar() {
     console.error('❌ MONGODB_URI no definido. Verificá backend/.env');
     process.exit(1);
   }
-
   if (!process.env.GROQ_API_KEY) {
     console.error('❌ GROQ_API_KEY no definido. Verificá backend/.env');
     process.exit(1);
@@ -255,12 +404,10 @@ async function iniciar() {
   await mongoose.connect(uri);
   console.log('✅ Conectado a MongoDB Atlas');
 
-  // Ejecutar inmediatamente al arrancar
   await ejecutarCiclo();
 
-  // Programar ciclos futuros
-  // '* * * * *'    → cada 1 minuto  (testing)
-  // '0 */6 * * *'  → cada 6 horas  (producción)
+  // '* * * * *'   → cada 1 minuto  (testing)
+  // '0 */6 * * *' → cada 6 horas  (producción)
   const CRON_INTERVAL = '* * * * *';
 
   console.log(`⏰ Cron programado: "${CRON_INTERVAL}" (cada 1 min para testing)`);
